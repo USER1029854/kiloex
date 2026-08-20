@@ -43,3 +43,20 @@ higher; only the Base pool is measured here.)
 - unauthorized-access bar: met — a random key with zero privileges sets prices (proof #1, #2).
 - economic bar: met overwhelmingly — ~100% of a $3.3M pool, capital supplied by a flash loan.
 - current state: the specific path is closed (execute disabled + setPrices removed); proof #1 @latest reverts.
+
+## Cost to execute (why the economic bar is met independent of stake)
+Measured from the 3 real Base exploit txs (receipts: gasUsed x effectiveGasPrice; USDC Transfer logs):
+
+| item | amount | is it a real cost? |
+|---|---|---|
+| upfront own capital | **0.00 USDC** (attacker EOA sent 0 in, all 3 txs) | — |
+| flash-loan principal | 10,000 USDC borrowed & **repaid same tx** (x3) | no (atomic repay) |
+| flash-loan fee | **15.00 USDC** total (5/tx) | yes (trivial) |
+| gas | **0.000007 ETH total (~$0.01)** — Base gas 0.001-0.002 gwei | yes (trivial) |
+| capital at risk if any step reverts | **0** (single atomic tx) | — |
+| **net profit** | **3,323,170.89 USDC** | — |
+| **return on actual cost** | **~220,000x** (3.32M / ~15) | — |
+
+The exploit is self-financing: the ~338 USDC position margin was taken from the flash loan and the
+5-USDC fee is paid out of the proceeds within the same tx. Minimum upfront holding = gas money (~$0.01).
+Even without a flash loan the attack needs only ~$338 of margin — capital is not a barrier either way.

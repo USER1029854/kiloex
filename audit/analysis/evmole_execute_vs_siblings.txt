@@ -1,0 +1,11 @@
+VULN forwarder 0xbed75e25 — storage READ sets
+  execute      0x47153f82: [('0x36', 'uint256'), ('0x37', 'uint256'), ('0x6a', 'mapping(address => uint256)')]
+  batchRelay   0x2b3102be: [('0x36', 'uint256'), ('0x37', 'uint256'), ('0x6a', 'mapping(address => uint256)'), ('0x9c', 'uint256'), ('0xce', 'mapping(address => bool)'), ('0xd3', 'mapping(address => bool)')]
+  isKeeper slot=0xce, approvedRouters slot=0xd3, nonces slot=0x6a
+  => execute() reads NEITHER 0xce nor 0xd3; batchRelay reads BOTH. Guard dropped from execute().
+
+CURRENT forwarder 0x9ddb41db — execute() storage reads: [] (empty => disabled)
+
+Price feed setPrices 0xac9fd279 present?:
+  exploit 0xa307f7f9: ac9fd279 PRESENT; new setters 4f0840be=n d0b9ff99=n
+  current 0x52cbc032: ac9fd279 ABSENT; new setters 4f0840be=y d0b9ff99=y

@@ -44,3 +44,11 @@
     tx1 0x6b378c... 3,125,495.72 | tx2 0xde7f5e... 186,595.77 | tx3 0xf0fcce... 11,079.39
 - BSC: exploit tx 0x1aaf5d1dc3cd07feb5530fbd6aa09d48b02cbd232f78a40c6ce8e12c55927d03 block 48358304
 - Each exploit tx = 2x forwarder.execute() (nonce 0 then 1) -> 2x setPrices (pump, then reset) bracketing a position open/close.
+
+## Additions from PoC / net-flow analysis
+- USDC liquidity pool (the DRAINED pool) : 0xdf5ACC616cD3ea9556EC340a11B54859a393ebBB
+    held 3,323,951.60 USDC @ pre-exploit block 28933729; -3,125,522.83 net in tx1; ~99.98% drained across 3 txs
+- Position/counterparty (VUSD burned)    : 0x43E3E6FFb2E363E64cD480Cbb7cd0CF47bc6b477  (-3,125,522.83 VUSD in tx1)
+- Price store (emits PriceUpdate)        : 0x22c40b883b5976f13c78ee45ead6b0cdc192dae5  (KiloPriceFeed writes token->price here)
+- NOTE: 0x7bc8d56c is the VUSD mint/burn manager (nets +22 USDC in tx1), NOT the collateral store; the collateral is in 0xdf5ACC61.
+- PoC fresh unprivileged signer            : 0xea29ca3a234d9f5d6556474f00b7e0894bf032d3  (isKeeper=false, !=owner, !=gov)

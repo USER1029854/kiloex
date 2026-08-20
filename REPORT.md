@@ -13,7 +13,7 @@
 
 2. **Confirmed root cause (Critical), both chains.** The KiloEx `KiloPriceFeed.setPrices()` authorized its caller with `require(msg.sender == trustedForwarder)` — i.e. it trusted *the forwarder contract itself* and delegated the "is this an authorized price keeper?" decision to the forwarder. The forwarder's `execute((address,address,uint256,uint256,uint256,bytes),bytes)` was a stock OpenZeppelin `MinimalForwarder`: it verified only that the EIP-712 signature matched `req.from` and that the nonce matched — it **did not** check `isKeeper(req.from)` or `approvedRouters(req.to)`, even though the forwarder's *sibling* relay function does. Net effect: **anyone could self-sign a request `{from: their own EOA, to: KiloPriceFeed, data: setPrices(arbitrary)}`, and the forwarder would relay it to `setPrices` with `msg.sender == forwarder`, passing the gate.** Manipulated price → open+close a perp position through the router → drain the vault. Verified by decompilation, storage-layout analysis, live on-chain reads, and **direct simulation** (the attacker's exact nonce-0 payload returns success at the pre-exploit block). §3.
 
-3. **Realized loss I could measure:** **3,323,170.89 USDC on Base** across 3 transactions (each = two `setPrices` calls bracketing a position). BSC leg confirmed on-chain (same technique, same attacker, same spoof EOA). Funds *at risk* under the broken invariant were the entire perp collateral/vault balance of every market on every deployment, not just what was withdrawn. §3, §7.
+3. **Realized loss / funds at risk — measured, not estimated.** The manipulated price is monetized through a perp position paid out of the USDC liquidity pool `0xdf5ACC61…`. That pool held **3,323,951.60 USDC** immediately before the attack; the attacker drained **3,323,170.89 USDC** across 3 Base txs — **99.98% of the entire pool**. So "at risk" ≈ the whole pool (and it was taken), on every market/chain the feed serves; BSC leg confirmed on-chain (same technique/attacker/spoof-EOA). The finding is not exaggerated — if anything a single-tx figure understates it. §3.5, §7. **I proved exploitability from scratch with a freshly-generated, zero-privilege key (§3.5).**
 
 4. **Relaunch fix — verified, both chains: the forwarder path is closed.** The forwarder proxy was upgraded to an implementation whose `execute()` **reverts unconditionally with `"not allowed"`** (no `SLOAD`, no caller check — the function is disabled), and the KiloPriceFeed was upgraded to an implementation that **no longer exposes `setPrices` (`0xac9fd279`) at all**. The current fixed forwarder implementation is **byte-identical on Base and BSC**. The specific exploit is no longer reachable. §4.
 
@@ -112,6 +112,21 @@ I replayed the attacker's **exact** nonce-0 `execute` calldata against the forwa
 - **Minimal fix (and the one actually shipped):** the forwarder must enforce `isKeeper(req.from)` (and/or `approvedRouters(req.to)`) inside `execute`, and/or the price feed must verify the *originator* is a keeper rather than trusting the forwarder address. KiloEx instead removed the paths (see §4) — effective, though narrower than repairing the trust model.
 - **Falsifier:** if `execute` had read slot `0xce`/`0xd3` (it doesn't), or if `setPrices` had recovered `_msgSender()` and checked `isKeeper` on it (it checks `msg.sender==forwarder`), or if `0x551f31` were actually a keeper (it isn't) — any one would break the finding. None holds.
 
+### 3.5 PoC — reproduced from scratch with a fresh, zero-privilege key (answers "is it exaggerated / does anything gate it / how much is at risk")
+
+§3.3 replayed the attacker's *own* payload. To prove no key/secret/role is needed, I generated a **brand-new private key** in-repo (`keccak("kiloex-poc-fresh-signer-2026")` → `A = 0xea29ca3a…234d…f032d3`) that on-chain is **`isKeeper(A)=false`, `A≠owner`, `A≠gov`**, has no allowance and has never appeared on-chain. Script + full output: **`audit/poc/poc_freshkey.py`**, **`audit/poc/RESULTS.md`**. I first *validated the forwarder's EIP-712 domain* by re-deriving the attacker's real signature: slot `0x36`=`keccak("MinimalForwarder")`, slot `0x37`=`keccak("0.0.1")`, and the reconstructed digest recovers the attacker's sig to exactly `0x551f31` — so my forged signatures are accepted on identical terms.
+
+**Proof #1 (stateless, `eth_call`):** `A` self-signs `execute({from:A, to:priceFeed, data:setPrices(token 0x9ef1b8c0 = price 100)})`; an arbitrary relayer submits it.
+- @ Base block 28933729 (vulnerable impl): **SUCCESS**
+- @ latest (fixed impl): **revert `"not allowed"`**
+
+**Proof #2 (stateful, anvil fork @ 28933729):** submitted as a **real transaction** from an arbitrary funded relayer (execute has no caller gate):
+- tx **status `0x1`** (SUCCESS), gas ≈ 167k
+- `getNonce(A)` **0 → 1** (the request was accepted and committed to state)
+- **event emitted** by price store `0x22c40b88…`: `PriceUpdate(token=0x9ef1b8c0…, price=100, ts=1744656864)` — an unprivileged key set an arbitrary on-chain price.
+
+**How much is at risk (measured):** the price is monetized out of the USDC pool `0xdf5ACC61…`, identified as the drained pool by net-flow analysis of the real exploit tx (the only address with a large net USDC outflow, −3,125,522.83 in tx1). That pool held **3,323,951.60 USDC** pre-exploit; **3,323,170.89** was taken across 3 txs = **99.98% of the pool**. At-risk ≈ the entire pool, per market, per chain — the flash loan supplies working capital, so attacker stake is ~0. **Conclusion: not exaggerated; the exploit needs no privilege, no admin, and no secret — only a keypair and a flash loan.**
+
 ---
 
 ## 4. Verifying the relaunch fix
@@ -178,7 +193,7 @@ Measured from tx receipts (USDC = `0x833589fc`, Transfer→attacker EOA):
 | `0xf0fcce…` | 11,079.39 |
 | **total** | **3,323,170.89** |
 
-This is the value that left via the manipulated-price positions on Base. It is *realized* loss; **severity is sized to the invariant** (all collateral pricable by `setPrices`, all chains), which is materially larger. BSC realized loss was not summed exhaustively (endpoint limits, §9) but the exploit tx is identified and the mechanism is identical.
+**Where it came from (net-flow reconciliation of tx1):** the only address with a large net USDC outflow is the liquidity pool **`0xdf5ACC61…` (−3,125,522.83 USDC)**; correspondingly `0x43E3E6FF…` burned −3,125,522.83 VUSD (position PnL). The USDC "profit" is therefore *minted as position PnL at the manipulated price and paid out of the pool* — not a static-balance skim. That pool held **3,323,951.60 USDC** immediately before the attack, so the drained 3,323,170.89 is **99.98% of the pool** — at-risk ≈ realized ≈ the whole pool. (The VUSD-manager `0x7bc8d56c…` only nets +22 USDC in tx1; it is the mint/burn hub, not the collateral store — corrected from the initial map.) **Severity is sized to the invariant** (all collateral pricable by `setPrices`, all chains). BSC realized loss was not summed exhaustively (endpoint limits, §9) but the exploit tx is identified and the mechanism is identical.
 
 ---
 

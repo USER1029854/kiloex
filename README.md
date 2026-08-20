@@ -22,6 +22,7 @@ per-config — see the residual caveat in the report.
 - `audit/resolved_system.md` — full address/slot/impl map (Base + BSC), exploit facts.
 - `audit/analysis/evmole_execute_vs_siblings.txt` — the structural proof (execute reads no keeper slot; sibling does; setter removed).
 - `audit/analysis/simulations.md` — the live `eth_call` proofs (bug reproduced pre-fix; reverts post-fix; both chains).
+- `audit/poc/poc_freshkey.py` + `audit/poc/RESULTS.md` — **PoC**: a freshly-generated zero-privilege key sets an arbitrary price (eth_call + anvil-fork committed tx); at-risk = 99.98% of the 3.32M USDC pool.
 - `audit/decomp/` — heimdall decompilations (vuln/current forwarder, exploit/current price feed).
 - `audit/base/`, `audit/bsc/` — raw runtime bytecode + decoded exploit calldata.
 

@@ -17,7 +17,7 @@
 
 4. **Relaunch fix — verified, both chains: the forwarder path is closed.** The forwarder proxy was upgraded to an implementation whose `execute()` **reverts unconditionally with `"not allowed"`** (no `SLOAD`, no caller check — the function is disabled), and the KiloPriceFeed was upgraded to an implementation that **no longer exposes `setPrices` (`0xac9fd279`) at all**. The current fixed forwarder implementation is **byte-identical on Base and BSC**. The specific exploit is no longer reachable. §4.
 
-5. **Residual / structural caveat (the fix is narrow, not a redesign).** The price feed *still* authorizes callers by address-equality against the forwarder/router slots (`0x97`/`0x9b`) rather than by verifying the original signer is a keeper. Safety now rests on two *mutable* facts: (a) `execute()` staying disabled, and (b) the forwarder's remaining relay entrypoint (`0x2b3102be`) staying keeper-gated. Both are one proxy upgrade away from change, and both are gov/owner-controlled. This is an operational guarantee, not a structural one. §4.3, §5.
+5. **The fix is structural (corrected — see §4.6).** An earlier version of this report called the fix "narrow/operational — the price feed still trusts the forwarder by address." That was **wrong**: I had not tested the *new* price functions (`0x4f0840be`/`0xd0b9ff99`) that **replaced** `setPrices`. On adversarial re-audit of live state, those functions enforce a **two-layer** guard: `require(msg.sender == trustedForwarder)` **and then** `require(isKeeper(_msgSender()))` on the *original* relayed sender — i.e. exactly the keeper check the old `setPrices` lacked (and whose absence was the bug). An unprivileged caller is now blocked at **three** independent barriers (`execute()` disabled → `"not allowed"`; forwarder batch relays → `"keeper: not allowed"`; price fns → `"not trustedForwarder"`/`"not keeper"`). **On Base and BSC, an unprivileged party cannot set prices — verified by direct simulation of every path (§4.6).** Residual risk is now only: (a) it is still an upgradeable proxy, so a future malicious/mistaken upgrade could reintroduce the class; (b) the keeper set is trusted and prices have **no on-chain sanity bound**, so a compromised/faulty keeper can still write an arbitrary price (§8); (c) opBNB/Taiko/Manta deployments remain **unassessed** (§9).
 
 **Confidence:** high on the root cause and on the fix (decompiled + simulated on live state, both chains). The KiloEx implementations are all **unverified**; every claim below is anchored to bytecode I decompiled, storage I read, or calls I simulated — cited inline. Items I could not fully close are in §9.
 
@@ -148,8 +148,22 @@ The current price feed impl `0x52cbc032…` **does not contain selector `0xac9fd
 Both chains carry the same fix. I could not read opBNB/Taiko/Manta from the endpoints available here — those deployments are **unassessed** and flagged in §9.
 
 ### 4.5 Verdict on the fix
-**The specific exploit is closed on Base and BSC** (relay disabled + vulnerable setter removed). **But the underlying "authorize by forwarder address, not by keyed keeper" design persists in the price feed.** This makes the current safety a property of *mutable implementation + config*, not of structure:
-- Re-enabling any ungated relay on the forwarder, or adding an ungated caller to price-feed slot `0x97`/`0x9b`, reintroduces the exact class. Owner/gov can upgrade either proxy in one tx (forwarder owner Base `0x54e8742a…`, BSC `0xdff3c7ce…`; both proxies are admin-upgradeable). Report consumers should treat "fixed" as "fixed in the currently-deployed implementations," expiring on the next upgrade.
+**The specific exploit is closed on Base and BSC**, and the closure is **structural** (the keeper check the old `setPrices` lacked now exists on the new price functions — §4.6), not merely the removal of one path. The remaining caveat is the generic one for any upgradeable system: both proxies are admin-upgradeable (forwarder owner Base `0x54e8742a…`, BSC `0xdff3c7ce…`), so a future malicious/mistaken upgrade could reintroduce the class. Treat "fixed" as "fixed in the currently-deployed implementations," which I verified at latest.
+
+### 4.6 Current-state adversarial re-audit (added after review challenge — "is anything at risk today?")
+I re-checked live state (Base, latest block; impls confirmed unchanged: forwarder `0x9ddb41db`, price feed `0x52cbc032`) by simulating **every** price-setting path from an **unprivileged attacker** address, and — crucially — testing the new price functions with *well-formed* calldata (a malformed call reverts on a length check *before* the guard, which would be a false "fixed"):
+
+| path | caller | result |
+|---|---|---|
+| forwarder `execute` `0x47153f82` | attacker | `revert "not allowed"` (disabled) |
+| forwarder batch relay `0x2b3102be` | attacker | revert (keeper-gated) |
+| forwarder price batch `0xccf2626f`/`0xef0a2e36` | attacker | `revert "keeper: not allowed"` |
+| price feed old `setPrices` `0xac9fd279` | attacker | revert (selector removed) |
+| price feed **new** `0xd0b9ff99` (well-formed) | attacker | `revert "DelegateCollection: not trustedForwarder"` |
+| price feed **new** `0xd0b9ff99` (well-formed) | **the forwarder** | `revert "DelegateCollection: not keeper"` ← **layer-2 keeper check on `_msgSender()`** |
+| price feed **new** `0xd0b9ff99` (well-formed) | router / random | `revert "not trustedForwarder"` |
+
+The forwarder-sourced call getting past layer 1 and dying on **`"not keeper"`** is the proof that the new setter verifies `isKeeper(_msgSender())` — the exact guard whose absence the exploit abused (the old setter checked only `msg.sender == trustedForwarder`; had it checked the keeper, the attacker's `_msgSender()=0x551f31`, a non-keeper, would have failed). So the caller-settable-price bug is genuinely closed on Base and BSC for an unprivileged actor. What this re-audit does **not** clear: opBNB/Taiko/Manta (unassessed, §9), keeper-key compromise + no price sanity bound (§8), and the generic upgrade risk above.
 
 ---
 
@@ -195,7 +209,9 @@ Measured from tx receipts (USDC = `0x833589fc`, Transfer→attacker EOA):
 | `0xf0fcce…` | 11,079.39 |
 | **total** | **3,323,170.89** |
 
-**Where it came from (net-flow reconciliation of tx1):** the only address with a large net USDC outflow is the liquidity pool **`0xdf5ACC61…` (−3,125,522.83 USDC)**; correspondingly `0x43E3E6FF…` burned −3,125,522.83 VUSD (position PnL). The USDC "profit" is therefore *minted as position PnL at the manipulated price and paid out of the pool* — not a static-balance skim. That pool held **3,323,951.60 USDC** immediately before the attack, so the drained 3,323,170.89 is **99.98% of the pool** — at-risk ≈ realized ≈ the whole pool. (The VUSD-manager `0x7bc8d56c…` only nets +22 USDC in tx1; it is the mint/burn hub, not the collateral store — corrected from the initial map.) **Severity is sized to the invariant** (all collateral pricable by `setPrices`, all chains). BSC realized loss was not summed exhaustively (endpoint limits, §9) but the exploit tx is identified and the mechanism is identical.
+**Where it came from (net-flow reconciliation of tx1):** the only address with a large net USDC outflow is the liquidity pool **`0xdf5ACC61…` (−3,125,522.83 USDC)**; correspondingly `0x43E3E6FF…` burned −3,125,522.83 VUSD (position PnL). The USDC "profit" is therefore *minted as position PnL at the manipulated price and paid out of the pool* — not a static-balance skim. That pool held **3,323,951.60 USDC** immediately before the attack, so the drained 3,323,170.89 is **99.98% of the pool** — at-risk ≈ realized ≈ the whole pool. (The VUSD-manager `0x7bc8d56c…` only nets +22 USDC in tx1; it is the mint/burn hub, not the collateral store — corrected from the initial map.) **Severity is sized to the invariant** (all collateral pricable by `setPrices`, all chains).
+
+**Multi-chain reconciliation (why "$3.32M" not "$7M").** The **$3,323,170.89 is the Base slice only.** The public KiloEx incident (~$7–7.5M) was spread across **Base + BSC + opBNB + Taiko + Manta**, hit by the *same* attacker EOA `0x00fac9…` with the *same* forwarder-relayed-`setPrices` technique. On-chain confirmation of a second chain: BSC exploit tx `0x1aaf5d1d…` alone moved **892,937.52 USDT** to the attacker EOA (one tx; the attacker ran several on BSC, mirroring Base's three). So the Base figure is not a discrepancy — it is one chain's portion of the multi-chain total, and it is exact (measured from receipts, and equal to 99.98% of the Base pool).
 
 ---
 
